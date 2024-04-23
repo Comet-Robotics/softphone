@@ -2,7 +2,7 @@
 # -*- coding: iso-8859-1 -*-
 # coding=utf-8
 
-import pjsua as pj
+import pjsua2 as pj
 import logging
 
 logger = logging.getLogger(__name__)

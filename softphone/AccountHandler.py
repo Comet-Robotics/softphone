@@ -4,7 +4,7 @@
 
 import logging
 import threading
-import pjsua as pj
+import pjsua2 as pj
 from .CallHandler import CallHandler
 
 logger = logging.getLogger(__name__)

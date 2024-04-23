@@ -4,7 +4,7 @@
 import os
 import time
 import logging
-import pjsua as pj
+import pjsua2 as pj
 
 from threading import Thread
 from .Exceptions import *
@@ -17,9 +17,9 @@ logging.addLevelName(5, "TRACE")
 
 class Softphone:
 
-    ua_cfg = pj.UAConfig()
+    ua_cfg = pj.UaConfig()
     log_cfg = pj.LogConfig()
-    log_cfg.callback = lambda level, str, len: logger.info(str.strip())
+    log_cfg.writer = lambda level, msg, threadId, threadName: logger.info(msg.strip())
     media_cfg = pj.MediaConfig() # look at the options it takes: https://www.pjsip.org/python/pjsua.htm#MediaConfig
 
     def __init__(
@@ -49,27 +49,37 @@ class Softphone:
         self.pid = os.getpid()
 
         # Media config
-        self.media_cfg.clock_rate    = sample_rate
-        self.media_cfg.channel_count = channel_count 
+        self.media_cfg.clockRate    = sample_rate
+        self.media_cfg.channelCount = channel_count 
 
         #self.media_cfg.snd_clock_rate = sample_rate# Clock rate to be applied when opening the sound device. If value is zero, conference bridge clock rate will be used.
-        self.media_cfg.audio_frame_ptime = duration_ms # Default: 20 ms audio data
+        self.media_cfg.audioFramePtime = duration_ms # Default: 20 ms audio data
         #self.media_cfg.no_vad = True # disable voice activation detection
         #self.media_cfg.enable_ice = False
-        self.media_cfg.max_media_ports = max_media_ports
+        self.media_cfg.maxMediaPorts = max_media_ports
 
         # User-agent config
-        self.ua_cfg.max_calls = max_calls
+        self.ua_cfg.maxCalls = max_calls
         self.ua_cfg.nameserver = nameserver
-        self.ua_cfg.user_agent = user_agent
+        self.ua_cfg.userAgent = user_agent
+        self.ua_cfg.mainThreadOnly = not thread
 
         # Log config
         self.log_cfg.level = log_level
 
+        ep_cfg = pj.EpConfig()
+        ep_cfg.uaConfig = self.ua_cfg
+        ep_cfg.logConfig = self.log_cfg
+        ep_cfg.medConfig = self.media_cfg
+
         # Lib settings (put this in run() instead when using multiprocessing.Process)
-        self.lib = pj.Lib() # Singleton instance
-        self.lib.init(ua_cfg=self.ua_cfg, log_cfg=self.log_cfg, media_cfg=self.media_cfg)
-        self.lib.start(with_thread=thread)
+        # self.lib = pj.Lib() # Singleton instance
+        # self.lib.init(ua_cfg=self.ua_cfg, log_cfg=self.log_cfg, media_cfg=self.media_cfg)
+
+        self.lib = pj.Endpoint()
+        self.lib.libCreate()
+        self.lib.libInit(ep_cfg)
+        self.lib.libStart()
 
         # Playback / Recording varaibles
         self.player = None
@@ -87,7 +97,7 @@ class Softphone:
 
 
     def __del__(self):
-        self.lib.destroy()
+        self.lib.libDestroy()
         logger.info(f"Object destroyed.")
 
 
@@ -95,19 +105,24 @@ class Softphone:
         """ Register an account at i.e. Asterisk PBX, and set network transport options.
             Returns: Account registered, account callback handler.
         """
-        if   protocol == 'UDP': protocol = pj.TransportType.UDP
-        elif protocol == 'TCP': protocol = pj.TransportType.TCP
-        elif protocol == 'TLS': protocol = pj.TransportType.TLS
+        if   protocol == 'UDP': protocol = pj.PJSIP_TRANSPORT_UDP
+        elif protocol == 'TCP': protocol = pj.PJSIP_TRANSPORT_TCP
+        elif protocol == 'TLS': protocol = pj.PJSIP_TRANSPORT_TLS
         else: logger.info(f"Error: Invalid protocol type.")
 
-        logger.info("Creating transport and generating SIP URI.")
-        transport = self.lib.create_transport(
-            protocol,
-            pj.TransportConfig(0) # TransportConfig(host=bind_address, port=bind_port) # TODO: Add bind_address and bind_port here.
-        )
+        tr_cfg = pj.TransportConfig()
+        tr_cfg.boundAddress = bind_address
+        tr_cfg.port = bind_port
 
-        public_sip_uri = f"sip:{username}@{str(transport.info().host)}:{str(transport.info().port)}"
-        logger.info(f"Listening on {transport.info().host}:{transport.info().port} for {public_sip_uri}.")
+        logger.info("Creating transport and generating SIP URI.")
+        transport_id: int = self.lib.transportCreate(
+            protocol,
+            tr_cfg
+        )
+        tr_info: pj.TransportInfo = self.lib.transportGetInfo(transport_id)
+
+        public_sip_uri = f"sip:{username}@{str(tr_info.localAddress)}"
+        logger.info(f"Listening on {tr_info.localAddress} for {public_sip_uri}.")
         logger.info(f"Attempting registration for {public_sip_uri} at {server}:{port}.")
 
         account_cfg = pj.AccountConfig(
@@ -116,30 +131,33 @@ class Softphone:
             password = password
         )
 
-        account_cfg.id = public_sip_uri
+        account_cfg.idUri = public_sip_uri
 
-        account = self.lib.create_account(acc_config=account_cfg, set_default=default_account)
-        account.set_transport(transport)
+        account = pj.Account()
+        account.create(account_cfg, default_account)
+        account.setTransport(transport_id)
 
         account_handler = AccountHandler(lib=self.lib, account=account)
-        account.set_callback(account_handler)
+        account.set_callback(account_handler) # TODO
 
         logger.info(f"Waiting for registration...")
         account_handler.wait()
-        logger.info(f"Successfully registered {public_sip_uri}, status: {account.info().reg_status} ({account.info().reg_reason}).")
+
+        account_info: pj.AccountInfo = account.getInfo()
+        logger.info(f"Successfully registered {public_sip_uri}, status: {account_info.regStatus} ({account_info.regStatusText}).")
 
         return account
 
 
-    def unregister(self, account):
+    def unregister(self, account: pj.Account):
         """ Unregister a registered account.
         """
         logger.info(f"Attempting to unregister account by deletion: {account}.")
-        account.delete()
+        account.shutdown()
         logger.info(f"Successfully unregistered and deleted account.")
 
 
-    def call(self, account, sip_uri):
+    def call(self, account: pj.Account, sip_uri: str):
         """ Make a new outgoing call to sip_uri from SIP account.
         """
         try:
@@ -147,25 +165,27 @@ class Softphone:
                 logger.info(f"Already have a call.")
                 return
 
-            if self.lib.verify_sip_url(sip_uri) != 0:
+            if self.lib.utilVerifySipUri(sip_uri) != 0:
                 logger.info(f"Invalid SIP URI.")
                 return
 
             logger.info(f"Attempting new call to {sip_uri}")
-            lck = self.lib.auto_lock() # To prevent deadlocks
+            lck = self.lib.auto() # To prevent deadlocks
 
             call_handler = CallHandler(
                 lib = self.lib, 
                 audio_cb_slot = self.audio_cb_slot
             )
-            self.current_call = account.make_call(sip_uri, cb=call_handler)
+            self.current_call = pj.Call(account) # TODO: do we need a call_id param?
+            self.current_call.makeCall(sip_uri)
+            # self.current_call = account.make_call(sip_uri, cb=call_handler) # TODO
             logger.info(f"Current call is {self.current_call}.")
             del lck
 
         except pj.Error as e:
             logger.info(f"Error: {e}")
             self.current_call = None
-            self.lib.destroy()
+            self.lib.libDestroy()
 
 
     def end_call(self):
@@ -191,14 +211,14 @@ class Softphone:
     def wait_for_active_audio(self):
         """ Wait until call audio is activated.
         """
-        while self.current_call.info().media_state != pj.MediaState.ACTIVE:
+        while all(map(lambda m: m.status != pj.PJSUA_CALL_MEDIA_ACTIVE, self.current_call.getInfo().media)):
             time.sleep(0.5)
 
 
     def wait_for_confirmed_call(self):
         """ Wait until call has been confirmed.
         """
-        while self.current_call.info().state != pj.CallState.CONFIRMED:
+        while self.current_call.getInfo().state != pj.PJSIP_INV_STATE_CONFIRMED:
             time.sleep(0.5)
 
 
@@ -209,9 +229,9 @@ class Softphone:
         if not self.current_call:
             raise PhoneCallNotInProgress("The call does not exist")
         
-        call_length = self.current_call.info().call_time
-        total_length = self.current_call.info().total_time
-        logger.info("Call duration information: connection '{call_length}' second(s), total '{total_length}' second(s).")
+        call_length = self.current_call.getInfo().connectDuration.sec
+        total_length = self.current_call.getInfo().totalDuration.sec
+        logger.info(f"Call duration information: connection {call_length} second(s), total {total_length} second(s).")
 
         return call_length, total_length
 
@@ -221,7 +241,7 @@ class Softphone:
         :param digits: String - Digits to send over the call
         """
         logger.debug("Sending DTMF key tones: '{digits}'")
-        self.current_call.dial_dtmf(digits)
+        self.current_call.dialDtmf(digits)
         logger.debug("DTMF tones sent")
 
 
