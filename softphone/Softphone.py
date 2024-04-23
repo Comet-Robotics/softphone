@@ -251,16 +251,19 @@ class Softphone:
         """
         sounddevices = []
 
-        snd_devs = self.lib.enum_snd_dev()
+        aud_dev_mgr: pj.AudDevManager = self.lib.audDevManager()
+        aud_dev_mgr.enumDev2()
+
+        snd_devs: list[pj.AudioDevInfo] = aud_dev_mgr.enumDev2()
 
         i = 0
         for snd_dev in snd_devs:
             dev = {}
             dev['index'] = i
             dev['name'] = snd_dev.name
-            dev['input_channels'] = snd_dev.input_channels
-            dev['output_channels'] = snd_dev.output_channels
-            dev['sample_rate'] = snd_dev.default_clock_rate
+            dev['input_channels'] = snd_dev.inputCount
+            dev['output_channels'] = snd_dev.outputCount
+            dev['sample_rate'] = snd_dev.defaultSamplesPerSec
             sounddevices.append(dev)
             i+=1
 
@@ -270,37 +273,38 @@ class Softphone:
     def set_null_sound_device(self):
         """ Set NULL sound device / Do not use system audio device.
         """
-        self.lib.set_null_snd_dev()
+        aud_dev_mgr: pj.AudDevManager = self.lib.audDevManager()
+        aud_dev_mgr.setNullDev()
         logger.info(f"Using NULL sound device.")
 
 
-    def get_capture_device(self):
+    def get_capture_device(self) -> int:
         """ Get capture device ID currently in use.
         """
-        capture_id, playback_id = self.lib.get_snd_dev()
-        return capture_id
+        aud_dev_mgr: pj.AudDevManager = self.lib.audDevManager()
+        return aud_dev_mgr.getCaptureDev()
 
 
-    def set_capture_device(self, capture_id):
+    def set_capture_device(self, capture_id: int):
         """ Set capture device ID to be used.
         """
-        _, playback_id = self.lib.get_snd_dev()
-        self.lib.set_snd_dev(capture_id, playback_id)
+        aud_dev_mgr: pj.AudDevManager = self.lib.audDevManager()
+        aud_dev_mgr.setCaptureDev(capture_id)
         logger.info(f"Capture device set to: {capture_id}")
 
 
-    def get_playback_device(self):
+    def get_playback_device(self) -> int:
         """ Get playback device ID currently in use.
         """
-        capture_id, playback_id = self.lib.get_snd_dev()
-        return playback_id
+        aud_dev_mgr: pj.AudDevManager = self.lib.audDevManager()
+        return aud_dev_mgr.getPlaybackDev()
 
 
-    def set_playback_device(self, playback_id):
+    def set_playback_device(self, playback_id: int):
         """ Set playback device ID to be used.
         """
-        capture_id, _ = self.lib.get_snd_dev()
-        self.lib.set_snd_dev(capture_id, playback_id)
+        aud_dev_mgr: pj.AudDevManager = self.lib.audDevManager()
+        aud_dev_mgr.setPlaybackDev(playback_id)
         logger.info(f"Playback device set to: {playback_id}")
 
 
